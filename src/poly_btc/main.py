@@ -8,6 +8,7 @@ from .clob_client import CLOBClient
 from .db import BatchWriter, apply_schema, close_pool, init_pool
 from .gamma import GammaDiscovery
 from .log import get_logger, setup_logging
+from .resolver import run_forever as resolver_run_forever
 from .rtds_client import RTDSClient
 
 log = get_logger(__name__)
@@ -42,6 +43,7 @@ async def _amain() -> None:
             asyncio.create_task(discovery.run_forever(), name="discovery"),
             asyncio.create_task(rtds.run_forever(), name="rtds"),
             asyncio.create_task(clob.run_forever(), name="clob"),
+            asyncio.create_task(resolver_run_forever(), name="resolver"),
         ]
         log.info("collector_started")
         await stop.wait()
