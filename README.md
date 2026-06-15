@@ -8,7 +8,7 @@ The collector subscribes to:
 
 Discovery is via Gamma REST (`/markets?slug=btc-updown-5m-{window_ts}`), probing a sliding window around the current 5-minute boundary.
 
-## Setup
+## Setup — local (venv)
 
 ```bash
 cd poly-btc-5m-analyse
@@ -16,12 +16,25 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
-cp .env.example .env  # edit DATABASE_URL
-createdb poly_btc      # or via psql
+cp .env.example .env  # set DATABASE_URL to your remote DSN
 
 python scripts/smoke.py     # verifies DB + Gamma
 python -m poly_btc.main     # starts the collector
 ```
+
+## Setup — Docker (server or local)
+
+```bash
+cp .env.example .env  # set DATABASE_URL (same DSN as local)
+docker compose up -d --build
+docker compose logs -f collector
+```
+
+The image is ~150 MB (python:3.12-slim base) and runs as non-root user `app`. No
+local Postgres needed — collector connects to whatever `DATABASE_URL` you set.
+
+Schema is auto-applied on startup (idempotent `CREATE TABLE IF NOT EXISTS`), so
+the same DB can be shared between dev and prod containers safely.
 
 ## Schema
 

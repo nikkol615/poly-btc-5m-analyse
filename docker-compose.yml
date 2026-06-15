@@ -1,0 +1,12 @@
+services:
+  collector:
+    build: .
+    image: poly-btc-collector:latest
+    container_name: poly-btc-collector
+    env_file: .env
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
