@@ -8,6 +8,8 @@ from .config import settings
 def setup_logging() -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
     logging.basicConfig(format="%(message)s", level=level)
+    for noisy in ("httpx", "httpcore", "websockets.client", "websockets.protocol"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
