@@ -16,11 +16,15 @@ st.set_page_config(page_title="Polymarket BTC 5m backtester", layout="wide")
 def run_simulation(
     x_sec: int, y_usd: float, n_markets: int, signal: str,
     max_spot_staleness_sec: int, max_book_staleness_sec: int,
+    min_ask_cents: int, retry_enabled: bool, retry_interval_sec: int,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     trades, summary = asyncio.run(simulate(
         x_sec, y_usd, n_markets, SignalSource(signal),
         max_spot_staleness_sec=max_spot_staleness_sec,
         max_book_staleness_sec=max_book_staleness_sec,
+        min_ask_cents=min_ask_cents,
+        retry_enabled=retry_enabled,
+        retry_interval_sec=retry_interval_sec,
     ))
     return trades, summary.__dict__
 
@@ -39,6 +43,22 @@ signal = st.sidebar.radio(
     index=0,
 )
 st.sidebar.markdown("---")
+st.sidebar.subheader("Min price + retry")
+min_ask_cents = st.sidebar.number_input(
+    "A — min entry price, ¢ (skip if cheaper)",
+    min_value=0, max_value=99, value=10, step=1,
+)
+retry_enabled = st.sidebar.checkbox("Retry until price ≥ A", value=False)
+retry_interval_sec = st.sidebar.number_input(
+    "R — retry interval, sec", min_value=1, max_value=60, value=2, step=1,
+    disabled=not retry_enabled,
+)
+st.sidebar.caption(
+    "If chosen side's best_ask is below A at t_entry, skip the trade. "
+    "With Retry on, re-check every R seconds until price reaches A or window closes."
+)
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("Data-quality gates")
 max_spot_age = st.sidebar.slider("Max BTC spot age, sec", 1, 120, 15)
 max_book_age = st.sidebar.slider("Max PM book age, sec", 1, 60, 10)
@@ -54,6 +74,7 @@ with st.spinner("Running simulation..."):
     trades, summary = run_simulation(
         int(x_sec), float(y_usd), int(n_markets), signal,
         int(max_spot_age), int(max_book_age),
+        int(min_ask_cents), bool(retry_enabled), int(retry_interval_sec),
     )
 
 # --- Summary cards ---
@@ -73,7 +94,8 @@ c8.metric("Sharpe (naive)",       f"{summary['sharpe']:.2f}")
 st.caption(
     f"Skipped: stale={summary['n_skipped_stale']}, "
     f"no_data={summary['n_skipped_no_data']}, "
-    f"bad_price={summary['n_skipped_bad_price']}"
+    f"bad_price={summary['n_skipped_bad_price']}, "
+    f"price_too_low={summary['n_skipped_price_too_low']}"
 )
 
 if trades.empty:
@@ -96,7 +118,7 @@ show_pm_entry = st.checkbox("Show PM entry prices", value=True)
 show_pm_close = st.checkbox("Show PM close prices", value=True)
 
 cols = ["window_end", "side", "win", "pnl_usd",
-        "entry_price_cents", "entry_bid_cents", "spread_cents",
+        "entry_price_cents", "entry_bid_cents", "spread_cents", "retry_sec",
         "resolved_outcome", "slug"]
 if show_btc:
     cols = cols[:7] + ["strike_btc", "spot_at_entry", "spot_minus_strike", "close_btc"] + cols[7:]

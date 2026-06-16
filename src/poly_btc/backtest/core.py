@@ -34,6 +34,7 @@ class Summary:
     n_skipped_no_data: int
     n_skipped_stale: int
     n_skipped_bad_price: int
+    n_skipped_price_too_low: int
     total_pnl: float
     win_rate: float
     avg_entry_price: float        # cents
@@ -67,15 +68,67 @@ def _decide_side(row: pd.Series, signal: SignalSource) -> str | None:
     return "Up" if up_mid >= dn_mid else "Down"
 
 
+def _walk_retries(
+    history: list[dict] | None,
+    initial_ask: float | None,
+    initial_bid: float | None,
+    min_ask_cents: int,
+    retry_enabled: bool,
+    retry_interval_sec: int,
+    max_attempt_sec: int,
+) -> tuple[float | None, float | None, int | None]:
+    """Walk retries until best_ask >= min_ask_cents/100. Returns (ask, bid, sec_offset).
+    sec_offset is seconds AFTER t_entry where the qualifying snapshot was found
+    (0 means initial moment). Returns (None, None, None) if never qualifies.
+    """
+    threshold = min_ask_cents / 100.0
+
+    # Attempt 0: use the existing entry snapshot the SQL already returned.
+    if initial_ask is not None and initial_ask >= threshold:
+        return float(initial_ask), float(initial_bid) if initial_bid is not None else None, 0
+
+    if not retry_enabled or retry_interval_sec <= 0 or not history:
+        return None, None, None
+
+    # Walk attempts at R, 2R, 3R, ... while still strictly before window_end.
+    # `history` is sorted by sec (ascending). Each attempt picks the LAST history
+    # entry whose sec <= attempt_sec (latest book at-or-before that moment).
+    hist_pairs = [(int(h["sec"]), float(h["ask"]), float(h["bid"]) if h.get("bid") is not None else None)
+                  for h in history if h.get("ask") is not None]
+    if not hist_pairs:
+        return None, None, None
+
+    attempt_sec = retry_interval_sec
+    while attempt_sec <= max_attempt_sec:
+        # Latest history entry with sec <= attempt_sec
+        snap = None
+        for s, a, b in hist_pairs:
+            if s <= attempt_sec:
+                snap = (s, a, b)
+            else:
+                break
+        if snap is not None:
+            _, ask, bid = snap
+            if ask >= threshold:
+                return ask, bid, attempt_sec
+        attempt_sec += retry_interval_sec
+
+    return None, None, None
+
+
 def _build_trade_row(
     row: pd.Series,
     signal: SignalSource,
     y: float,
     max_spot_staleness_sec: int,
     max_book_staleness_sec: int,
+    min_ask_cents: int,
+    retry_enabled: bool,
+    retry_interval_sec: int,
+    x_sec: int,
 ) -> tuple[dict | None, str]:
     """Returns (trade_row_or_none, skip_reason).
-    skip_reason values: "" (kept), "no_data", "stale", "bad_price".
+    skip_reason values: "" (kept), "no_data", "stale", "bad_price", "price_too_low".
     """
     side = _decide_side(row, signal)
     if side is None:
@@ -96,16 +149,33 @@ def _build_trade_row(
         entry_ask = row.get("up_ask_entry")
         entry_bid = row.get("up_bid_entry")
         book_age = row.get("up_book_staleness_s")
+        history = row.get("up_entry_history")
     else:
         entry_ask = row.get("dn_ask_entry")
         entry_bid = row.get("dn_bid_entry")
         book_age = row.get("dn_book_staleness_s")
+        history = row.get("dn_entry_history")
 
     if entry_ask is None or pd.isna(entry_ask) or entry_ask <= 0:
         return None, "no_data"
     if pd.isna(book_age) or int(book_age) > max_book_staleness_sec:
         return None, "stale"
-    entry_price = float(entry_ask)
+
+    # Walk min-ask + retry logic (leave 1 sec before window_end as buffer).
+    max_attempt_sec = max(0, x_sec - 1)
+    chosen_ask, chosen_bid, attempt_sec = _walk_retries(
+        history,
+        float(entry_ask),
+        float(entry_bid) if entry_bid is not None and not pd.isna(entry_bid) else None,
+        min_ask_cents=min_ask_cents,
+        retry_enabled=retry_enabled,
+        retry_interval_sec=retry_interval_sec,
+        max_attempt_sec=max_attempt_sec,
+    )
+    if chosen_ask is None:
+        return None, "price_too_low"
+
+    entry_price = chosen_ask
     if entry_price >= 1.0:
         return None, "bad_price"
 
@@ -121,10 +191,11 @@ def _build_trade_row(
         "win": bool(win),
         "pnl_usd": round(pnl, 4),
         "entry_price_cents": round(entry_price * 100, 2),
-        "entry_bid_cents": (round(float(entry_bid) * 100, 2)
-                            if entry_bid is not None and not pd.isna(entry_bid) else None),
-        "spread_cents": (round((float(entry_ask) - float(entry_bid)) * 100, 2)
-                         if entry_bid is not None and not pd.isna(entry_bid) else None),
+        "entry_bid_cents": (round(chosen_bid * 100, 2)
+                            if chosen_bid is not None else None),
+        "spread_cents": (round((entry_price - chosen_bid) * 100, 2)
+                         if chosen_bid is not None else None),
+        "retry_sec": attempt_sec,  # 0 = bought immediately at t_entry
         # Signal inputs
         "strike_btc": round(float(row["strike_btc"]), 4) if not pd.isna(row.get("strike_btc")) else None,
         "spot_at_entry": (round(float(row["spot_at_entry"]), 4)
@@ -165,6 +236,7 @@ def _summarize(trades: pd.DataFrame, skip_counts: dict[str, int]) -> Summary:
             n_skipped_no_data=skip_counts.get("no_data", 0),
             n_skipped_stale=skip_counts.get("stale", 0),
             n_skipped_bad_price=skip_counts.get("bad_price", 0),
+            n_skipped_price_too_low=skip_counts.get("price_too_low", 0),
             total_pnl=0.0, win_rate=0.0, avg_entry_price=0.0,
             avg_winning_entry=0.0, avg_losing_entry=0.0,
             sharpe=0.0, max_drawdown=0.0,
@@ -183,6 +255,7 @@ def _summarize(trades: pd.DataFrame, skip_counts: dict[str, int]) -> Summary:
         n_skipped_no_data=skip_counts.get("no_data", 0),
         n_skipped_stale=skip_counts.get("stale", 0),
         n_skipped_bad_price=skip_counts.get("bad_price", 0),
+        n_skipped_price_too_low=skip_counts.get("price_too_low", 0),
         total_pnl=float(pnl.sum()),
         win_rate=float(trades["win"].mean()),
         avg_entry_price=float(trades["entry_price_cents"].mean()),
@@ -200,16 +273,21 @@ async def simulate(
     signal: SignalSource = SignalSource.SPOT_VS_STRIKE,
     max_spot_staleness_sec: int = 15,
     max_book_staleness_sec: int = 10,
+    min_ask_cents: int = 0,
+    retry_enabled: bool = False,
+    retry_interval_sec: int = 2,
 ) -> tuple[pd.DataFrame, Summary]:
     raw = await fetch_resolved_dataset(x_sec, n_markets)
     if raw.empty:
         return pd.DataFrame(), _summarize(pd.DataFrame(), {})
 
     rows: list[dict] = []
-    skip = {"no_data": 0, "stale": 0, "bad_price": 0}
+    skip = {"no_data": 0, "stale": 0, "bad_price": 0, "price_too_low": 0}
     for _, row in raw.iterrows():
         trade, reason = _build_trade_row(
-            row, signal, y_usd, max_spot_staleness_sec, max_book_staleness_sec
+            row, signal, y_usd,
+            max_spot_staleness_sec, max_book_staleness_sec,
+            min_ask_cents, retry_enabled, retry_interval_sec, x_sec,
         )
         if trade is None:
             skip[reason] = skip.get(reason, 0) + 1

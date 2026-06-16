@@ -57,7 +57,11 @@ SELECT
     EXTRACT(EPOCH FROM (r.t_entry - dn_e.ts))::int        AS dn_book_staleness_s,
     -- Close book snapshots
     up_c.best_bid AS up_bid_close, up_c.best_ask AS up_ask_close,
-    dn_c.best_bid AS dn_bid_close, dn_c.best_ask AS dn_ask_close
+    dn_c.best_bid AS dn_bid_close, dn_c.best_ask AS dn_ask_close,
+    -- Per-second history of best_ask in [t_entry, window_end] for retry logic.
+    -- Subsampled: one row per second (latest book within that second).
+    up_h.history AS up_entry_history,
+    dn_h.history AS dn_entry_history
 FROM resolved r
 -- BTC spot lookups (any source)
 LEFT JOIN LATERAL (SELECT ts, source, price FROM btc_spot
@@ -91,6 +95,43 @@ LEFT JOIN LATERAL (SELECT ts, best_bid, best_ask FROM pm_book
                    WHERE token_id = r.token_down AND ts <= r.window_end
                      AND best_ask IS NOT NULL AND best_bid IS NOT NULL
                    ORDER BY ts DESC LIMIT 1) dn_c ON true
+-- Per-second history arrays for retry walk
+LEFT JOIN LATERAL (
+    SELECT jsonb_agg(jsonb_build_object(
+               'sec',  EXTRACT(EPOCH FROM (sec_ts - r.t_entry))::int,
+               'bid',  best_bid,
+               'ask',  best_ask
+           ) ORDER BY sec_ts) AS history
+    FROM (
+        SELECT DISTINCT ON (date_trunc('second', b.ts))
+               date_trunc('second', b.ts) AS sec_ts,
+               b.best_bid, b.best_ask
+        FROM pm_book b
+        WHERE b.token_id = r.token_up
+          AND b.ts >= r.t_entry
+          AND b.ts <= r.window_end
+          AND b.best_ask IS NOT NULL AND b.best_bid IS NOT NULL
+        ORDER BY date_trunc('second', b.ts), b.ts DESC
+    ) s
+) up_h ON true
+LEFT JOIN LATERAL (
+    SELECT jsonb_agg(jsonb_build_object(
+               'sec',  EXTRACT(EPOCH FROM (sec_ts - r.t_entry))::int,
+               'bid',  best_bid,
+               'ask',  best_ask
+           ) ORDER BY sec_ts) AS history
+    FROM (
+        SELECT DISTINCT ON (date_trunc('second', b.ts))
+               date_trunc('second', b.ts) AS sec_ts,
+               b.best_bid, b.best_ask
+        FROM pm_book b
+        WHERE b.token_id = r.token_down
+          AND b.ts >= r.t_entry
+          AND b.ts <= r.window_end
+          AND b.best_ask IS NOT NULL AND b.best_bid IS NOT NULL
+        ORDER BY date_trunc('second', b.ts), b.ts DESC
+    ) s
+) dn_h ON true
 ORDER BY r.window_end DESC;
 """
 
