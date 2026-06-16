@@ -21,9 +21,12 @@ log = get_logger(__name__)
 
 LOOP_INTERVAL_SEC = 5.0
 # Wait this long past window_end before snapping close_price (lets late ticks land).
-LATE_GRACE_SEC = 15
-# How far before window_start the tick may be (should be 0; small slack for clock skew).
+LATE_GRACE_SEC = 30
+# How far before window_start the tick may be (small slack for clock skew).
 STRIKE_LOOKBACK_SEC = 5
+# Max seconds AFTER window_start we'll accept as the strike tick. Chainlink WS
+# delivers in bursts so the nearest tick may be 1–3 minutes off the boundary.
+STRIKE_LOOKAHEAD_SEC = 180
 
 
 _STRIKE_SQL = """
@@ -34,7 +37,7 @@ FROM (
     FROM markets m
     JOIN btc_spot s ON s.source = 'chainlink'
                    AND s.ts >= m.window_start - make_interval(secs => %(lookback)s)
-                   AND s.ts <  m.window_start + interval '60 seconds'
+                   AND s.ts <= m.window_start + make_interval(secs => %(lookahead)s)
     WHERE m.strike IS NULL
       AND m.window_start <= NOW()
     ORDER BY m.slug, s.ts ASC
@@ -52,11 +55,11 @@ FROM (
     FROM markets m
     JOIN btc_spot s ON s.source = 'chainlink'
                    AND s.ts >= m.window_start
-                   AND s.ts <= m.window_end
+                   AND s.ts <= m.window_end + make_interval(secs => %(grace)s)
     WHERE m.close_price IS NULL
       AND m.strike IS NOT NULL
       AND m.window_end <= NOW() - make_interval(secs => %(grace)s)
-    ORDER BY m.slug, s.ts DESC
+    ORDER BY m.slug, ABS(EXTRACT(EPOCH FROM (s.ts - m.window_end)))
 ) sub
 WHERE m.slug = sub.slug
 RETURNING m.slug, m.strike, m.close_price, m.resolved_outcome;
@@ -67,7 +70,8 @@ async def resolve_once() -> tuple[int, int]:
     """One pass: returns (strike_filled, close_filled)."""
     async with get_conn() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(_STRIKE_SQL, {"lookback": STRIKE_LOOKBACK_SEC})
+            await cur.execute(_STRIKE_SQL, {"lookback": STRIKE_LOOKBACK_SEC,
+                                             "lookahead": STRIKE_LOOKAHEAD_SEC})
             strikes = await cur.fetchall()
             await cur.execute(_CLOSE_SQL, {"grace": LATE_GRACE_SEC})
             closes = await cur.fetchall()

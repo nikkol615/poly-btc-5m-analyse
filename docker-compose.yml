@@ -1,8 +1,9 @@
 services:
   collector:
     build: .
-    image: poly-btc-collector:latest
+    image: poly-btc:latest
     container_name: poly-btc-collector
+    command: ["poly-btc-collector"]
     env_file: .env
     restart: unless-stopped
     logging:
@@ -10,3 +11,18 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  app:
+    build: .
+    image: poly-btc:latest
+    container_name: poly-btc-app
+    command: ["poly-btc-app"]
+    env_file: .env
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

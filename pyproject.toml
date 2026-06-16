@@ -18,11 +18,13 @@ dependencies = [
 backtest = [
     "pandas>=2.2",
     "numpy>=1.26",
-    "matplotlib>=3.9",
+    "streamlit>=1.38",
+    "altair>=5.4",
 ]
 
 [project.scripts]
 poly-btc-collector = "poly_btc.main:run"
+poly-btc-app = "poly_btc.backtest.cli:run_streamlit"
 
 [build-system]
 requires = ["setuptools>=68"]
