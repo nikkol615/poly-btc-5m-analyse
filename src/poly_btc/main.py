@@ -4,6 +4,8 @@ import asyncio
 import signal
 from typing import Any
 
+from .binance_client import BinanceSpotClient
+from .chainlink_snapshot import ChainlinkSnapshotRotator
 from .clob_client import CLOBClient
 from .db import BatchWriter, apply_schema, close_pool, init_pool
 from .gamma import GammaDiscovery
@@ -24,6 +26,8 @@ async def _amain() -> None:
 
     rtds = RTDSClient(writer)
     clob = CLOBClient(writer)
+    binance = BinanceSpotClient(writer)
+    chainlink = ChainlinkSnapshotRotator(writer)
 
     async def on_new_market(m: dict[str, Any]) -> None:
         await rtds.add_slug(m["slug"])
@@ -43,6 +47,8 @@ async def _amain() -> None:
             asyncio.create_task(discovery.run_forever(), name="discovery"),
             asyncio.create_task(rtds.run_forever(), name="rtds"),
             asyncio.create_task(clob.run_forever(), name="clob"),
+            asyncio.create_task(binance.run_forever(), name="binance"),
+            asyncio.create_task(chainlink.run_forever(), name="chainlink-rotator"),
             asyncio.create_task(resolver_run_forever(), name="resolver"),
         ]
         log.info("collector_started")
@@ -54,6 +60,8 @@ async def _amain() -> None:
 
     await rtds.stop()
     await clob.stop()
+    await binance.stop()
+    await chainlink.stop()
     await writer.stop()
     await close_pool()
     log.info("collector_stopped")

@@ -1,12 +1,13 @@
-"""Polymarket Real-Time Data Socket (RTDS) client.
+"""Polymarket Real-Time Data Socket (RTDS) — activity/trades subscription only.
 
 URL:    wss://ws-live-data.polymarket.com
-Subs:   {"action":"subscribe","subscriptions":[{topic,type,filters}]}
-Ping:   send "PING" every 5s (server may also send periodic empty / control frames).
-Envelope (observed): {"payload": {"data": [...]}}  — no topic/type at envelope
-level, so we dispatch by payload shape:
-  - chainlink tick:   {"timestamp": <ms>, "value": <float>}
-  - activity trade:   {"price","size","market_slug",...}
+Subs:   {"action":"subscribe","subscriptions":[{topic:"activity",type:"trades",filters:{market_slug}}]}
+
+NOTE: We do NOT subscribe to `crypto_prices_chainlink` here — that topic returns
+one snapshot per connection and never pushes updates, so it is handled by
+`ChainlinkSnapshotRotator` (which reconnects periodically).
+
+Envelope (observed): {"payload": {"data": [...]}}
 """
 from __future__ import annotations
 
@@ -28,14 +29,6 @@ log = get_logger(__name__)
 PING_INTERVAL = 5.0
 RECONNECT_DELAY_BASE = 1.0
 RECONNECT_DELAY_MAX = 30.0
-
-
-def _sub_chainlink_btc() -> dict[str, Any]:
-    return {
-        "topic": "crypto_prices_chainlink",
-        "type": "update",
-        "filters": json.dumps({"symbol": "btc/usd"}),
-    }
 
 
 def _sub_activity_trades(slug: str) -> dict[str, Any]:
@@ -102,9 +95,9 @@ class RTDSClient:
             await self._ws.send(orjson.dumps(msg).decode())
 
     async def _send_initial_subs(self) -> None:
-        subs: list[dict[str, Any]] = [_sub_chainlink_btc()]
-        for slug in self._slugs:
-            subs.append(_sub_activity_trades(slug))
+        if not self._slugs:
+            return
+        subs = [_sub_activity_trades(slug) for slug in self._slugs]
         await self._send({"action": "subscribe", "subscriptions": subs})
         self._subscribed_slugs = set(self._slugs)
         log.info("rtds_subscribed_initial", slugs=len(self._slugs))
@@ -121,15 +114,6 @@ class RTDSClient:
             return
 
     def _dispatch_item(self, fallback_ts: datetime, it: dict[str, Any]) -> None:
-        # Chainlink crypto tick — {"timestamp": ms, "value": float}
-        if "value" in it and "price" not in it and "market_slug" not in it:
-            price = _f(it.get("value"))
-            if price is None:
-                return
-            ts = _parse_ts(it.get("timestamp", fallback_ts))
-            self._writer.add_spot(ts, "chainlink", price)
-            return
-
         # Activity trade — has price/size and market_slug or asset_id
         if "price" in it and ("market_slug" in it or "asset_id" in it or "slug" in it):
             ts = _parse_ts(
