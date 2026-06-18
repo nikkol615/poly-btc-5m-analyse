@@ -35,6 +35,7 @@ class Summary:
     n_skipped_stale: int
     n_skipped_bad_price: int
     n_skipped_price_too_low: int
+    n_skipped_low_agreement: int
     total_pnl: float
     win_rate: float
     avg_entry_price: float        # cents
@@ -126,9 +127,11 @@ def _build_trade_row(
     retry_enabled: bool,
     retry_interval_sec: int,
     x_sec: int,
+    min_signal_agreement_pct: float,
 ) -> tuple[dict | None, str]:
     """Returns (trade_row_or_none, skip_reason).
-    skip_reason values: "" (kept), "no_data", "stale", "bad_price", "price_too_low".
+    skip_reason values: "" (kept), "no_data", "stale", "bad_price",
+    "price_too_low", "low_agreement".
     """
     side = _decide_side(row, signal)
     if side is None:
@@ -144,6 +147,17 @@ def _build_trade_row(
         or int(spot_age) > max_spot_staleness_sec
     ):
         return None, "stale"
+
+    # Signal-agreement filter: fraction of pre-entry binance ticks that confirm
+    # the side we picked. If the pre-entry data is missing (no binance coverage
+    # for this window) we DON'T filter — we let the trade through.
+    pct_above = row.get("pct_above_strike_before_entry")
+    agreement_pct = None
+    if not pd.isna(pct_above):
+        agreement_pct = (float(pct_above) if side == "Up"
+                         else 100.0 - float(pct_above))
+        if agreement_pct < min_signal_agreement_pct:
+            return None, "low_agreement"
 
     if side == "Up":
         entry_ask = row.get("up_ask_entry")
@@ -196,6 +210,13 @@ def _build_trade_row(
         "spread_cents": (round((entry_price - chosen_bid) * 100, 2)
                          if chosen_bid is not None else None),
         "retry_sec": attempt_sec,  # 0 = bought immediately at t_entry
+        # Pre-entry window dynamics (known at decision time, usable as filters)
+        "btc_range_before_entry": (round(float(row["btc_range_before_entry"]), 2)
+                                   if not pd.isna(row.get("btc_range_before_entry")) else None),
+        "crossed_strike_before_entry": (int(row["crossed_strike_before_entry"])
+                                        if not pd.isna(row.get("crossed_strike_before_entry")) else None),
+        # % of pre-entry ticks that AGREE with the side we picked (computed above).
+        "signal_agreement_pct": round(agreement_pct, 1) if agreement_pct is not None else None,
         # Signal inputs
         "strike_btc": round(float(row["strike_btc"]), 4) if not pd.isna(row.get("strike_btc")) else None,
         "spot_at_entry": (round(float(row["spot_at_entry"]), 4)
@@ -237,6 +258,7 @@ def _summarize(trades: pd.DataFrame, skip_counts: dict[str, int]) -> Summary:
             n_skipped_stale=skip_counts.get("stale", 0),
             n_skipped_bad_price=skip_counts.get("bad_price", 0),
             n_skipped_price_too_low=skip_counts.get("price_too_low", 0),
+            n_skipped_low_agreement=skip_counts.get("low_agreement", 0),
             total_pnl=0.0, win_rate=0.0, avg_entry_price=0.0,
             avg_winning_entry=0.0, avg_losing_entry=0.0,
             sharpe=0.0, max_drawdown=0.0,
@@ -256,6 +278,7 @@ def _summarize(trades: pd.DataFrame, skip_counts: dict[str, int]) -> Summary:
         n_skipped_stale=skip_counts.get("stale", 0),
         n_skipped_bad_price=skip_counts.get("bad_price", 0),
         n_skipped_price_too_low=skip_counts.get("price_too_low", 0),
+        n_skipped_low_agreement=skip_counts.get("low_agreement", 0),
         total_pnl=float(pnl.sum()),
         win_rate=float(trades["win"].mean()),
         avg_entry_price=float(trades["entry_price_cents"].mean()),
@@ -264,6 +287,42 @@ def _summarize(trades: pd.DataFrame, skip_counts: dict[str, int]) -> Summary:
         sharpe=sharpe,
         max_drawdown=dd,
     )
+
+
+def apply_strategy(
+    raw: pd.DataFrame,
+    x_sec: int,
+    y_usd: float,
+    signal: SignalSource = SignalSource.SPOT_VS_STRIKE,
+    max_spot_staleness_sec: int = 15,
+    max_book_staleness_sec: int = 10,
+    min_ask_cents: int = 0,
+    retry_enabled: bool = False,
+    retry_interval_sec: int = 2,
+    min_signal_agreement_pct: float = 0,
+) -> tuple[pd.DataFrame, Summary]:
+    """Pure: given a pre-fetched raw market dataset, apply the strategy and
+    return (trades_df, summary). No I/O; safe to call from cache layers."""
+    if raw.empty:
+        return pd.DataFrame(), _summarize(pd.DataFrame(), {})
+
+    rows: list[dict] = []
+    skip = {"no_data": 0, "stale": 0, "bad_price": 0,
+            "price_too_low": 0, "low_agreement": 0}
+    for _, row in raw.iterrows():
+        trade, reason = _build_trade_row(
+            row, signal, y_usd,
+            max_spot_staleness_sec, max_book_staleness_sec,
+            min_ask_cents, retry_enabled, retry_interval_sec, x_sec,
+            min_signal_agreement_pct,
+        )
+        if trade is None:
+            skip[reason] = skip.get(reason, 0) + 1
+        else:
+            rows.append(trade)
+
+    trades = pd.DataFrame(rows)
+    return trades, _summarize(trades, skip)
 
 
 async def simulate(
@@ -276,23 +335,13 @@ async def simulate(
     min_ask_cents: int = 0,
     retry_enabled: bool = False,
     retry_interval_sec: int = 2,
+    min_signal_agreement_pct: float = 0,
 ) -> tuple[pd.DataFrame, Summary]:
+    """Convenience: fetch dataset from DB and apply strategy in one call."""
     raw = await fetch_resolved_dataset(x_sec, n_markets)
-    if raw.empty:
-        return pd.DataFrame(), _summarize(pd.DataFrame(), {})
-
-    rows: list[dict] = []
-    skip = {"no_data": 0, "stale": 0, "bad_price": 0, "price_too_low": 0}
-    for _, row in raw.iterrows():
-        trade, reason = _build_trade_row(
-            row, signal, y_usd,
-            max_spot_staleness_sec, max_book_staleness_sec,
-            min_ask_cents, retry_enabled, retry_interval_sec, x_sec,
-        )
-        if trade is None:
-            skip[reason] = skip.get(reason, 0) + 1
-        else:
-            rows.append(trade)
-
-    trades = pd.DataFrame(rows)
-    return trades, _summarize(trades, skip)
+    return apply_strategy(
+        raw, x_sec, y_usd, signal,
+        max_spot_staleness_sec, max_book_staleness_sec,
+        min_ask_cents, retry_enabled, retry_interval_sec,
+        min_signal_agreement_pct,
+    )
