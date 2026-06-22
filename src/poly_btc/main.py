@@ -7,6 +7,7 @@ from typing import Any
 from .binance_client import BinanceSpotClient
 from .chainlink_snapshot import ChainlinkSnapshotRotator
 from .clob_client import CLOBClient
+from .compactor import run_forever as compactor_run_forever
 from .db import BatchWriter, apply_schema, close_pool, init_pool
 from .gamma import GammaDiscovery
 from .log import get_logger, setup_logging
@@ -50,6 +51,7 @@ async def _amain() -> None:
             asyncio.create_task(binance.run_forever(), name="binance"),
             asyncio.create_task(chainlink.run_forever(), name="chainlink-rotator"),
             asyncio.create_task(resolver_run_forever(), name="resolver"),
+            asyncio.create_task(compactor_run_forever(), name="compactor"),
         ]
         log.info("collector_started")
         await stop.wait()

@@ -171,15 +171,11 @@ class CLOBClient:
             self._writer.add_book(ts, asset_id, "book", bid, ask, bid_sz, ask_sz)
 
         elif et == "price_change":
-            for ch in ev.get("price_changes") or []:
-                asset_id = str(ch.get("asset_id") or "") or None
-                if not asset_id:
-                    continue
-                self._writer.add_book(
-                    ts, asset_id, "price_change",
-                    _f(ch.get("best_bid")), _f(ch.get("best_ask")),
-                    None, None,
-                )
+            # Skipped on purpose. Each price_change event carries best_bid/best_ask
+            # but a matching `best_bid_ask` event is emitted by the server on the
+            # same top-of-book transition, so persisting both is redundant.
+            # Dropping price_change cuts pm_book write volume by ~60-70%.
+            pass
 
         elif et == "best_bid_ask":
             asset_id = str(ev.get("asset_id") or "") or None

@@ -21,6 +21,12 @@ CREATE TABLE IF NOT EXISTS markets (
 CREATE INDEX IF NOT EXISTS idx_markets_window_ts ON markets(window_ts);
 CREATE INDEX IF NOT EXISTS idx_markets_window_end ON markets(window_end);
 
+-- Compactor marker: set when the market's pm_book rows have been compressed to
+-- 1Hz `compact` snapshots. Idempotent migration for existing DBs.
+ALTER TABLE markets ADD COLUMN IF NOT EXISTS compacted_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_markets_compacted_pending
+    ON markets(window_end) WHERE compacted_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS btc_spot (
     ts     TIMESTAMPTZ      NOT NULL,
     source TEXT             NOT NULL,
@@ -50,8 +56,9 @@ CREATE TABLE IF NOT EXISTS pm_trades (
     side      TEXT,
     price     NUMERIC(8, 6),
     size      NUMERIC(20, 8),
-    tx_hash   TEXT,
-    raw       JSONB
+    tx_hash   TEXT
 );
+-- Idempotent migration: drop legacy raw JSONB if it exists.
+ALTER TABLE pm_trades DROP COLUMN IF EXISTS raw;
 CREATE INDEX IF NOT EXISTS idx_pm_trades_slug_ts ON pm_trades(slug, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_pm_trades_token_ts ON pm_trades(token_id, ts DESC);

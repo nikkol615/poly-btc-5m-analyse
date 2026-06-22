@@ -119,13 +119,12 @@ async def insert_pm_trades_many(rows: Sequence[dict[str, Any]]) -> None:
     if not rows:
         return
     sql = """
-    INSERT INTO pm_trades (ts, slug, token_id, outcome, side, price, size, tx_hash, raw)
-    VALUES (%(ts)s, %(slug)s, %(token_id)s, %(outcome)s, %(side)s, %(price)s, %(size)s, %(tx_hash)s, %(raw)s);
+    INSERT INTO pm_trades (ts, slug, token_id, outcome, side, price, size, tx_hash)
+    VALUES (%(ts)s, %(slug)s, %(token_id)s, %(outcome)s, %(side)s, %(price)s, %(size)s, %(tx_hash)s);
     """
-    payload = [{**r, "raw": Jsonb(r.get("raw"))} for r in rows]
     async with get_conn() as conn:
         async with conn.cursor() as cur:
-            await cur.executemany(sql, payload)
+            await cur.executemany(sql, rows)
         await conn.commit()
 
 
