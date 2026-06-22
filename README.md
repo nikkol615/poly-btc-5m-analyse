@@ -1,6 +1,10 @@
 # poly-btc-5m-analyse
 
-Collector + (future) backtester for Polymarket BTC 5-minute Up/Down markets.
+Collector + backtester for Polymarket BTC 5-minute Up/Down markets.
+
+📖 **Full documentation lives in [`docs/`](docs/README.md).** This README is a
+quick start; for architecture, schema, deployment, known issues and agent
+instructions, follow the links there.
 
 The collector subscribes to:
 - **RTDS** (`wss://ws-live-data.polymarket.com`) — Chainlink BTC/USD spot + Polymarket trades per market slug.
